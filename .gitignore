@@ -1,0 +1,19 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Job data and media (large, and specific to each recording)
+jobs/
+source/
+sample/
+output/
+work/
+*.mp4
+*.mkv
+*.webm
+*.wav
+
+# Local tooling
+.claude/
+.DS_Store

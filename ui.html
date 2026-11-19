@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Talk audio rescue</title>
+<style>
+  :root { --ink:#141414; --muted:#6b6b6b; --line:#e4e1da; --bg:#faf8f3; --accent:#d6246e; --ok:#1f8a4c; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:14px/1.5 -apple-system, BlinkMacSystemFont, "Inter", sans-serif; color:var(--ink); background:var(--bg); display:grid; grid-template-columns:280px 1fr; height:100vh; overflow:hidden; }
+  aside { border-right:1px solid var(--line); padding:18px; background:#fff; overflow:auto; }
+  main { padding:0 26px 60px; min-width:0; overflow:auto; }
+  .top { position:sticky; top:0; z-index:2; background:var(--bg); padding:18px 0 10px; border-bottom:1px solid var(--line); }
+  .top video { max-height:34vh; object-fit:contain; }
+  h1 { font-size:16px; margin:0 0 14px; }
+  h2 { font-size:13px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); margin:20px 0 8px; }
+  label { display:block; font-size:12px; color:var(--muted); margin:8px 0 2px; }
+  input, textarea, select { width:100%; font:inherit; padding:6px 8px; border:1px solid var(--line); border-radius:6px; background:var(--bg); }
+  .row { display:flex; gap:8px; } .row > div { flex:1; }
+  button { font:inherit; padding:7px 12px; border:1px solid var(--ink); background:#fff; border-radius:6px; cursor:pointer; }
+  button.primary { background:var(--ink); color:#fff; }
+  button.on { background:var(--ink); color:#fff; }
+  button:disabled { opacity:.4; cursor:default; }
+  .jobs div { padding:7px 8px; border-radius:6px; cursor:pointer; display:flex; justify-content:space-between; }
+  .jobs div:hover, .jobs div.sel { background:var(--bg); }
+  .st { font-size:11px; color:var(--muted); } .st.running { color:var(--accent); } .st.done { color:var(--ok); }
+  .bar { display:flex; gap:8px; align-items:center; margin:6px 0 12px; flex-wrap:wrap; }
+  .grid { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+  video { width:100%; border-radius:8px; background:#000; display:block; }
+  video.live { outline:3px solid var(--accent); }
+  figcaption { font-weight:600; margin-bottom:4px; }
+  pre { background:#111; color:#ddd; padding:10px; border-radius:6px; max-height:180px; overflow:auto; font-size:12px; white-space:pre-wrap; }
+  .lines { margin-top:14px; border-top:1px solid var(--line); }
+  .line { display:grid; grid-template-columns:58px 1fr; gap:10px; padding:7px 4px; border-bottom:1px solid var(--line); }
+  .line.cur { background:#fff3f8; }
+  .t { color:var(--muted); font-variant-numeric:tabular-nums; cursor:pointer; text-decoration:underline dotted; }
+  .txt { outline:none; border-radius:4px; padding:1px 3px; }
+  .txt:focus { background:#fff; box-shadow:0 0 0 1px var(--line); }
+  .txt.dirty { background:#fff8e1; }
+  .raw { color:var(--muted); font-size:12px; }
+  .tag { font-size:11px; border:1px solid var(--line); border-radius:4px; padding:0 5px; margin-left:6px; color:var(--muted); }
+  .empty { color:var(--muted); padding:40px 0; }
+</style>
+</head>
+<body>
+<aside>
+  <h1>Talk audio rescue</h1>
+  <h2>New job</h2>
+  <label>YouTube URL or local file path</label><input id="fSource" placeholder="https://www.youtube.com/watch?v=…">
+  <label>Job name</label><input id="fName" placeholder="meetup-2026-11">
+  <div class="row"><div><label>Start</label><input id="fStart" placeholder="10:00"></div>
+    <div><label>Duration</label><input id="fDur" placeholder="5:00"></div></div>
+  <label>Output</label>
+  <select id="fHeight"><option value="720" selected>720p, 30 fps</option><option value="1080">1080p, 30 fps</option><option value="">same as source</option></select>
+  <label>Voice</label>
+  <select id="fVoice"><option>am_michael</option><option>am_adam</option><option>am_eric</option><option>am_liam</option>
+    <option>bm_george</option><option>bm_lewis</option><option>af_heart</option><option>af_bella</option><option>bf_emma</option></select>
+  <label>Context for the polish step</label><textarea id="fCtx" rows="3" placeholder="Talk title, speaker, product names…"></textarea>
+  <label><input type="checkbox" id="fDrop" style="width:auto"> drop audience interjections</label>
+  <div style="margin-top:10px"><button class="primary" id="start">Start job</button></div>
+  <h2>Jobs</h2>
+  <div class="jobs" id="jobs"></div>
+</aside>
+<main id="main"><div class="empty">Pick a job on the left, or start a new one. Leave start/duration empty for the whole video.</div></main>
+<script>
+const $ = s => document.querySelector(s);
+const fmt = s => `${String(Math.floor(s/60)).padStart(2,'0')}:${String(Math.floor(s%60)).padStart(2,'0')}`;
+let current = null, poll = null;
+
+async function api(path, body) {
+  const r = await fetch(path, body ? {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)} : {});
+  return r.json();
+}
+async function loadJobs() {
+  const jobs = await api('/api/jobs');
+  $('#jobs').innerHTML = jobs.map(j => `<div data-n="${j.name}" class="${j.name===current?'sel':''}">${j.name}<span class="st ${j.status}">${j.status}</span></div>`).join('') || '<span class="st">none yet</span>';
+  $('#jobs').querySelectorAll('div').forEach(d => d.onclick = () => openJob(d.dataset.n));
+}
+$('#start').onclick = async () => {
+  const name = $('#fName').value.trim(), source = $('#fSource').value.trim();
+  if (!name || !source) return alert('Source and job name are required');
+  const r = await api('/api/run', {name, source, start:$('#fStart').value.trim(), duration:$('#fDur').value.trim(), height:$('#fHeight').value,
+    voice:$('#fVoice').value, context:$('#fCtx').value.trim(), drop_audience:$('#fDrop').checked});
+  if (r.error) return alert(r.error);
+  openJob(name);
+};
+
+async function openJob(name) {
+  current = name; loadJobs();
+  const j = await api('/api/job?name=' + encodeURIComponent(name));
+  const done = j.status === 'done';
+  const bust = '?v=' + Date.now();
+  $('#main').innerHTML = `<div class="top">
+    <h1>${name} <span class="st ${j.status}" id="jst">${j.status}</span></h1>
+    ${j.report.lines ? `<div class="st">${j.report.lines} lines · voice ${j.report.voice} · ${j.report.lines_sped_up} sped up · max delay ${j.report.max_delay_s}s</div>` : ''}
+    <div class="bar">
+      <button id="play" ${done?'':'disabled'}>▶ Play both</button>
+      <button id="aOrig">Hear original</button><button id="aNew" class="on">Hear re-voiced</button>
+      <span style="flex:1"></span>
+      <select id="rVoice" style="width:auto">${[...$('#fVoice').options].map(o=>`<option ${o.value===(j.meta.voice||j.report.voice)?'selected':''}>${o.value}</option>`).join('')}</select>
+      <button id="revoice" class="primary" ${j.polished.length?'':'disabled'}>Save edits & re-voice</button>
+    </div>
+    ${done ? `<div class="grid">
+      <figure style="margin:0"><figcaption>Original</figcaption><video id="vO" src="/media/${name}/clip.mp4" preload="auto" muted></video></figure>
+      <figure style="margin:0"><figcaption>Re-voiced</figcaption><video id="vN" src="/media/${name}/narrated.mp4${bust}" preload="auto" controls class="live"></video></figure>
+    </div>` : ''}
+    <pre id="log" style="${j.status==='running'||j.status==='failed'?'':'display:none'}"></pre></div>
+    <div class="lines" id="lines"></div>`;
+  const byIdx = Object.fromEntries((j.report.lines_detail||[]).map(l => [l.i, l]));
+  $('#lines').innerHTML = j.polished.map((p, i) => {
+    const l = byIdx[i]; const t = l ? l.placed : p.start - (j.polished[0]?.start||0);
+    return `<div class="line" data-t="${t}"><div class="t">${fmt(t)}</div><div>
+      <span class="txt" contenteditable data-i="${i}">${p.text}</span>${p.speaker==='audience'?'<span class="tag">audience</span>':''}${l&&l.speed>1?`<span class="tag">${l.speed}×</span>`:''}
+      <div class="raw">caption: ${p.raw||''}</div></div></div>`;
+  }).join('');
+  $('#lines').querySelectorAll('.txt').forEach(e => { e.dataset.orig = e.textContent; e.oninput = () => e.classList.toggle('dirty', e.textContent !== e.dataset.orig); });
+  if (done) wirePlayers();
+  $('#revoice').onclick = async () => {
+    const edits = {}; $('#lines').querySelectorAll('.txt.dirty').forEach(e => edits[e.dataset.i] = e.textContent);
+    if (Object.keys(edits).length) await api('/api/lines', {name, edits});
+    const meta = await api('/api/job?name=' + encodeURIComponent(name));
+    const r = await api('/api/run', {rerun:name, force:'narrate', voice:$('#rVoice').value});
+    if (r.error) return alert(r.error);
+    openJob(name);
+  };
+  clearInterval(poll);
+  if (j.status === 'running' || j.status === 'failed') {
+    const tick = async () => { const s = await api('/api/log?name=' + encodeURIComponent(name));
+      const lg = $('#log'); if (lg) { lg.textContent = s.log; lg.scrollTop = 1e9; }
+      if (s.status !== 'running') { clearInterval(poll); if (s.status === 'done') openJob(name); else loadJobs(); } };
+    tick(); poll = setInterval(tick, 1500);
+  }
+}
+
+function wirePlayers() {
+  const o = $('#vO'), n = $('#vN');
+  const listen = w => { o.muted = w!=='o'; n.muted = w!=='n'; $('#aOrig').classList.toggle('on', w==='o'); $('#aNew').classList.toggle('on', w==='n');
+    o.classList.toggle('live', w==='o'); n.classList.toggle('live', w==='n'); };
+  $('#aOrig').onclick = () => listen('o'); $('#aNew').onclick = () => listen('n');
+  $('#play').onclick = () => n.paused ? n.play() : n.pause();
+  n.addEventListener('play', () => { o.currentTime = n.currentTime; o.play(); $('#play').textContent = '❚❚ Pause'; });
+  n.addEventListener('pause', () => { o.pause(); $('#play').textContent = '▶ Play both'; });
+  n.addEventListener('seeked', () => o.currentTime = n.currentTime);
+  setInterval(() => { if (!n.paused && Math.abs(o.currentTime - n.currentTime) > .25) o.currentTime = n.currentTime; }, 1000);
+  $('#lines').querySelectorAll('.t').forEach(e => e.onclick = () => { n.currentTime = +e.parentElement.dataset.t; n.play(); });
+  n.addEventListener('timeupdate', () => { let c = null;
+    $('#lines').querySelectorAll('.line').forEach(e => { e.classList.remove('cur'); if (+e.dataset.t <= n.currentTime) c = e; });
+    if (c) c.classList.add('cur'); });
+}
+loadJobs(); setInterval(loadJobs, 5000);
+
+// URL presets, used by docs/screenshots.sh, e.g.
+//   #source=…&name=…&context=…           prefill the new-job form
+//   #job=sample-10m&t=130&hear=new&edit=31:New text   open a job, seek, show an edited line
+(async () => {
+  const h = Object.fromEntries(new URLSearchParams(location.hash.slice(1)));
+  if (h.source) $('#fSource').value = h.source;
+  if (h.name) $('#fName').value = h.name;
+  if (h.context) $('#fCtx').value = h.context;
+  if (!h.job) return;
+  await openJob(h.job);
+  const n = $('#vN');
+  if (n && h.t) { n.currentTime = +h.t; $('#vO').currentTime = +h.t; n.dispatchEvent(new Event('timeupdate')); }
+  if (h.hear === 'orig') $('#aOrig')?.click();
+  if (h.edit) {
+    const [i, ...txt] = h.edit.split(':'); const e = $(`.txt[data-i="${i}"]`);
+    if (e) { e.textContent = txt.join(':'); e.classList.add('dirty'); }
+  }
+  const cur = $('.line.cur') || (h.edit && $(`.txt[data-i="${h.edit.split(':')[0]}"]`));
+  if (cur) cur.scrollIntoView({block: 'nearest'});
+})();
+</script>
+</body>
+</html>
